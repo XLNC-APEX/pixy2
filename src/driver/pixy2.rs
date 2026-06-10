@@ -1,5 +1,5 @@
 use bytemuck::{Pod, Zeroable};
-use embedded_hal_async::spi::SpiDevice;
+use embedded_hal_async::spi::{Operation, SpiDevice};
 
 use crate::{Result, error::Error, packets::Request};
 
@@ -43,17 +43,47 @@ where
         Ok(bytemuck::cast(self.read::<16>(Request::VERSION).await?))
     }
 
-    async fn read<const N: usize>(&mut self, request: u8) -> Result<[u8; N]> {
-        let tx: [u8; 4] = [
-            0xae, // first byte of no_checksum_sync (little endian -> least-significant byte first)
-            0xc1, // second byte of no_checksum_sync
-            request, 0x00, // data_length is 0
-        ];
+    async fn read<const N: usize>(&mut self) -> Result<[u8; N]> {
         let mut rx = [0u8; N];
-        self.spi.write(&tx).await.map_err(|_| Error::SpiError)?;
-        self.sync().await?;
         self.spi.read(&mut rx).await.map_err(|_| Error::SpiError)?;
         Ok(rx)
+    }
+
+    pub async fn get_blocks(&mut self, sigmap: u8, max_blocks: u8) -> Result<Block> {
+        // let tx: [u8; 6] = [
+        //     Request::NO_CHECKSUM_SYNC_L,
+        //     Request::NO_CHECKSUM_SYNC_H,
+        //     2,
+        //     Request::BLOCKS,
+        //     sigmap, // first byte of no_checksum_sync (little endian -> least-significant byte first)
+        //     max_blocks,
+        // ];
+        let header = RequestHeader {
+            checksum_sync: Request::NO_CHECKSUM_SYNC,
+            length: 2,
+            packet_type: Request::BLOCKS,
+        };
+
+        self.spi.write(tx).await.map_err(|_| Error::SpiError)?;
+        // let head = self.read_header().await?;
+        // if head.t
+        Err(Error::SpiError)
+    }
+
+    async fn transmit(&mut self, header: &RequestHeader, data: &[u8]) -> Result<ResponseHeader> {
+        let tx = bytemuck::bytes_of(header);
+        self.spi
+            .transaction(&mut [Operation::Write(tx), Operation::Write(data)])
+            .await
+            .map_err(|_| Error::SpiError)?;
+        self.sync().await?;
+        self.read_header().await
+    }
+
+    async fn read_header(&mut self) -> Result<ResponseHeader> {
+        let mut rx = [0u8; 4];
+        self.spi.read(&mut rx).await.map_err(|_| Error::SpiError)?;
+        Ok(bytemuck::cast(rx))
     }
 }
 
@@ -71,7 +101,7 @@ impl defmt::Format for Version {
     fn format(&self, fmt: defmt::Formatter) {
         defmt::write!(
             fmt,
-            "hw: {} fw:{}.{} build: {} type: {:a}",
+            "hw: {:x} fw:{}.{} build: {} type: {:a}",
             self.hw,
             self.fw_major,
             self.fw_minor,
@@ -80,3 +110,40 @@ impl defmt::Format for Version {
         )
     }
 }
+
+#[derive(Copy, Clone, Pod, Zeroable)]
+#[repr(C)]
+pub struct RequestHeader {
+    pub checksum_sync: u16,
+    pub packet_type: u8,
+    pub length: u8,
+}
+
+#[derive(Copy, Clone, Pod, Zeroable)]
+#[repr(C)]
+pub struct ResponseHeader {
+    pub packet_type: u8,
+    pub length: u8,
+    pub checksum: u16,
+}
+
+#[derive(Copy, Clone, Pod, Zeroable)]
+#[repr(C)]
+pub struct Block {
+    pub signature: u16,
+    pub x: u16,
+    pub y: u16,
+    pub width: u16,
+    pub height: u16,
+    pub angle: i16,
+    pub index: u8,
+    pub age: u8,
+}
+//   uint16_t m_signature;
+//   uint16_t m_x;
+//   uint16_t m_y;
+//   uint16_t m_width;
+//   uint16_t m_height;
+//   int16_t m_angle;
+//   uint8_t m_index;
+//   uint8_t m_age;
