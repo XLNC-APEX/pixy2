@@ -1,3 +1,4 @@
+use defmt::{Format, dbg};
 use embedded_hal_async::spi::{Operation, SpiDevice};
 use zerocopy::{FromBytes as _, IntoBytes as _};
 use zerocopy_derive::{FromBytes, Immutable, IntoBytes, KnownLayout};
@@ -66,10 +67,11 @@ where
     //     self.spi.read(rx).await.map_err(|_| Error::SpiError)
     // }
 
-    pub async fn get_blocks(&mut self, sigmap: u8, max_blocks: u8) -> Result<&Block> {
+    pub async fn get_blocks(&mut self, sigmap: u8, max_blocks: u8) -> Result<&[Block]> {
         let res_header = self
             .transmit(&RequestHeader::blocks(), &[sigmap, max_blocks])
             .await?;
+        dbg!(&res_header);
         if res_header.packet_type == Response::BLOCKS {
             let len = res_header.length as usize;
             if len > BUF_SIZE {
@@ -79,10 +81,10 @@ where
                 .read(&mut self.buf[0..len])
                 .await
                 .map_err(|_| Error::SpiError)?;
-            // Ok(<[Block]>::ref_from_bytes(&self.buf[0..len]).unwrap())
-            let (blocks, _remainder) = Block::ref_from_prefix(&self.buf[0..len]).unwrap();
-            Ok(blocks)
+            dbg!(&self.buf[0..len]);
+            Ok(<[Block]>::ref_from_bytes(&self.buf[0..len]).unwrap())
         } else {
+            // Busy, wait a bit and read again
             Err(Error::Busy)
         }
     }
@@ -143,7 +145,7 @@ impl defmt::Format for Version {
 }
 
 #[derive(Clone, Copy, FromBytes, IntoBytes, KnownLayout, Immutable)]
-#[repr(C)]
+#[repr(C, packed)]
 pub struct RequestHeader {
     pub checksum_sync: u16,
     pub packet_type: u8,
@@ -172,16 +174,17 @@ impl RequestHeader {
     }
 }
 
-#[derive(FromBytes, IntoBytes, KnownLayout, Immutable)]
-#[repr(C)]
+#[derive(FromBytes, IntoBytes, KnownLayout, Immutable, Debug, Format)]
+#[repr(C, packed)]
 pub struct ResponseHeader {
     pub packet_type: u8,
     pub length: u8,
-    pub checksum: u16,
+    pub checksum_l: u8,
+    pub checksum_h: u8,
 }
 
 #[derive(FromBytes, IntoBytes, KnownLayout, Immutable, Clone, Copy)]
-#[repr(C)]
+#[repr(C, packed)]
 pub struct Block {
     pub signature: u16,
     pub x: u16,
