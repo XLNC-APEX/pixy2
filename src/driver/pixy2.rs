@@ -49,12 +49,15 @@ where
 
     pub async fn get_version(&mut self) -> Result<Version> {
         let res = self.transmit_header(&RequestHeader::version()).await?;
-        if res.packet_type == Response::VERSION {
-            let v = self.read::<16>().await?;
-            Ok(Version::read_from_bytes(&v).unwrap())
-        } else {
-            Err(Error::Busy)
+        for _ in 0..1024 {
+            if res.packet_type == Response::VERSION {
+                let v = self.read::<16>().await?;
+                return Ok(Version::read_from_bytes(&v).unwrap());
+            } else {
+                self.wait_busy().await?;
+            }
         }
+        Err(Error::Timeout)
     }
 
     async fn read<const N: usize>(&mut self) -> Result<[u8; N]> {
@@ -63,12 +66,8 @@ where
         Ok(rx)
     }
 
-    // async fn read_into<const N: usize>(&mut self, rx: &mut [u8; N]) -> Result<()> {
-    //     self.spi.read(rx).await.map_err(|_| Error::SpiError)
-    // }
-
     pub async fn get_blocks(&mut self, sigmap: u8, max_blocks: u8) -> Result<&[Block]> {
-        loop {
+        for _ in 0..1024 {
             let res_header = self
                 .transmit(&RequestHeader::blocks(), &[sigmap, max_blocks])
                 .await?;
@@ -89,6 +88,7 @@ where
                 self.wait_busy().await?;
             }
         }
+        Err(Error::Timeout)
     }
 
     async fn wait_busy(&mut self) -> Result<()> {
@@ -202,6 +202,31 @@ pub struct Block {
     pub angle: i16,
     pub index: u8,
     pub age: u8,
+}
+
+impl defmt::Format for Block {
+    fn format(&self, fmt: defmt::Formatter) {
+        let signature = self.signature;
+        let x = self.x;
+        let y = self.y;
+        let width = self.width;
+        let height = self.height;
+        let angle = self.angle;
+        let index = self.index;
+        let age = self.age;
+        defmt::write!(
+            fmt,
+            "pos: ({} {}), sig: {:b}, size: ({} {}), angle: {}, i: {}, age: {}",
+            x,
+            y,
+            signature,
+            width,
+            height,
+            angle,
+            index,
+            age
+        );
+    }
 }
 //   uint16_t m_signature;
 //   uint16_t m_x;
