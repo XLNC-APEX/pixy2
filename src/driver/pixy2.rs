@@ -68,27 +68,35 @@ where
     // }
 
     pub async fn get_blocks(&mut self, sigmap: u8, max_blocks: u8) -> Result<&[Block]> {
-        let res_header = self
-            .transmit(&RequestHeader::blocks(), &[sigmap, max_blocks])
-            .await?;
-        dbg!(&res_header);
-        if res_header.packet_type == Response::BLOCKS {
-            let len = res_header.length as usize;
-            if len > BUF_SIZE {
-                return Err(Error::BufferWontFit);
+        loop {
+            let res_header = self
+                .transmit(&RequestHeader::blocks(), &[sigmap, max_blocks])
+                .await?;
+            // dbg!(&res_header);
+            if res_header.packet_type == Response::BLOCKS {
+                let len = res_header.length as usize;
+                if len > BUF_SIZE {
+                    return Err(Error::BufferWontFit);
+                }
+                self.spi
+                    .read(&mut self.buf[0..len])
+                    .await
+                    .map_err(|_| Error::SpiError)?;
+                // dbg!(&self.buf[0..len]);
+                return Ok(<[Block]>::ref_from_bytes(&self.buf[0..len]).unwrap());
+            } else {
+                // Busy, wait a bit and read again
+                self.wait_busy().await?;
             }
-            self.spi
-                .read(&mut self.buf[0..len])
-                .await
-                .map_err(|_| Error::SpiError)?;
-            dbg!(&self.buf[0..len]);
-            Ok(<[Block]>::ref_from_bytes(&self.buf[0..len]).unwrap())
-        } else {
-            // Busy, wait a bit and read again
-            Err(Error::Busy)
         }
     }
 
+    async fn wait_busy(&mut self) -> Result<()> {
+        self.spi
+            .transaction(&mut [Operation::DelayNs(500_000)])
+            .await
+            .map_err(|_| Error::SpiError)
+    }
     async fn transmit_header(&mut self, header: &RequestHeader) -> Result<ResponseHeader> {
         self.spi
             .write(header.as_bytes())
