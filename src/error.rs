@@ -3,6 +3,8 @@
 pub enum Error {
     Timeout,
     SpiError,
+    Busy,
+    BufferWontFit,
 }
 
 impl core::fmt::Display for Error {

@@ -1,10 +1,18 @@
-use bytemuck::{Pod, Zeroable};
+use defmt::{Format, dbg};
 use embedded_hal_async::spi::{Operation, SpiDevice};
+use zerocopy::{FromBytes as _, IntoBytes as _};
+use zerocopy_derive::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
-use crate::{Result, error::Error, packets::Request};
+use crate::{
+    Result,
+    error::Error,
+    packets::{self, Request, Response},
+};
 
+const BUF_SIZE: usize = 0x104;
 pub struct Pixy2<SPI> {
     spi: SPI,
+    buf: [u8; BUF_SIZE],
 }
 
 impl<SPI> Pixy2<SPI>
@@ -12,7 +20,10 @@ where
     SPI: SpiDevice,
 {
     pub fn new(spi: SPI) -> Self {
-        Self { spi }
+        Self {
+            spi,
+            buf: [0u8; BUF_SIZE],
+        }
     }
 
     pub async fn init(&mut self) -> Result<()> {
@@ -22,25 +33,31 @@ where
 
     /// Skips all garbage data before the needed data
     async fn sync(&mut self) -> Result<()> {
-        let mut rx = [0u8; 1];
-        self.spi.read(&mut rx).await.map_err(|_| Error::SpiError)?;
-        let mut prev = rx;
+        let mut cur = self.read_byte().await?;
+        let mut prev = cur;
         for _ in 0..127 {
-            self.spi.read(&mut rx).await.map_err(|_| Error::SpiError)?;
-            if (rx[0] == 0xC1) && (prev[0] == 0xAF) {
-                // Skipping header
-                for _ in 0..4 {
-                    self.spi.read(&mut rx).await.map_err(|_| Error::SpiError)?;
-                }
+            // #[cfg(feature = "defmt")]
+            // defmt::dbg!(cur);
+            cur = self.read_byte().await?;
+            if (cur == packets::CHECKSUM_SYNC_H) && (prev == packets::CHECKSUM_SYNC_L) {
                 return Ok(());
             }
-            prev[0] = rx[0];
+            prev = cur;
         }
         Err(Error::Timeout)
     }
 
     pub async fn get_version(&mut self) -> Result<Version> {
-        Ok(bytemuck::cast(self.read::<16>(Request::VERSION).await?))
+        let res = self.transmit_header(&RequestHeader::version()).await?;
+        for _ in 0..1024 {
+            if res.packet_type == Response::VERSION {
+                let v = self.read::<16>().await?;
+                return Ok(Version::read_from_bytes(&v).unwrap());
+            } else {
+                self.wait_busy().await?;
+            }
+        }
+        Err(Error::Timeout)
     }
 
     async fn read<const N: usize>(&mut self) -> Result<[u8; N]> {
@@ -49,31 +66,49 @@ where
         Ok(rx)
     }
 
-    pub async fn get_blocks(&mut self, sigmap: u8, max_blocks: u8) -> Result<Block> {
-        // let tx: [u8; 6] = [
-        //     Request::NO_CHECKSUM_SYNC_L,
-        //     Request::NO_CHECKSUM_SYNC_H,
-        //     2,
-        //     Request::BLOCKS,
-        //     sigmap, // first byte of no_checksum_sync (little endian -> least-significant byte first)
-        //     max_blocks,
-        // ];
-        let header = RequestHeader {
-            checksum_sync: Request::NO_CHECKSUM_SYNC,
-            length: 2,
-            packet_type: Request::BLOCKS,
-        };
+    pub async fn get_blocks(&mut self, sigmap: u8, max_blocks: u8) -> Result<&[Block]> {
+        for _ in 0..1024 {
+            let res_header = self
+                .transmit(&RequestHeader::blocks(), &[sigmap, max_blocks])
+                .await?;
+            // dbg!(&res_header);
+            if res_header.packet_type == Response::BLOCKS {
+                let len = res_header.length as usize;
+                if len > BUF_SIZE {
+                    return Err(Error::BufferWontFit);
+                }
+                self.spi
+                    .read(&mut self.buf[0..len])
+                    .await
+                    .map_err(|_| Error::SpiError)?;
+                // dbg!(&self.buf[0..len]);
+                return Ok(<[Block]>::ref_from_bytes(&self.buf[0..len]).unwrap());
+            } else {
+                // Busy, wait a bit and read again
+                self.wait_busy().await?;
+            }
+        }
+        Err(Error::Timeout)
+    }
 
-        self.spi.write(tx).await.map_err(|_| Error::SpiError)?;
-        // let head = self.read_header().await?;
-        // if head.t
-        Err(Error::SpiError)
+    async fn wait_busy(&mut self) -> Result<()> {
+        self.spi
+            .transaction(&mut [Operation::DelayNs(500_000)])
+            .await
+            .map_err(|_| Error::SpiError)
+    }
+    async fn transmit_header(&mut self, header: &RequestHeader) -> Result<ResponseHeader> {
+        self.spi
+            .write(header.as_bytes())
+            .await
+            .map_err(|_| Error::SpiError)?;
+        self.sync().await?;
+        self.read_header().await
     }
 
     async fn transmit(&mut self, header: &RequestHeader, data: &[u8]) -> Result<ResponseHeader> {
-        let tx = bytemuck::bytes_of(header);
         self.spi
-            .transaction(&mut [Operation::Write(tx), Operation::Write(data)])
+            .transaction(&mut [Operation::Write(header.as_bytes()), Operation::Write(data)])
             .await
             .map_err(|_| Error::SpiError)?;
         self.sync().await?;
@@ -83,11 +118,17 @@ where
     async fn read_header(&mut self) -> Result<ResponseHeader> {
         let mut rx = [0u8; 4];
         self.spi.read(&mut rx).await.map_err(|_| Error::SpiError)?;
-        Ok(bytemuck::cast(rx))
+        Ok(ResponseHeader::read_from_bytes(&rx).unwrap())
+    }
+
+    async fn read_byte(&mut self) -> Result<u8> {
+        let mut rx = [0u8];
+        self.spi.read(&mut rx).await.map_err(|_| Error::SpiError)?;
+        Ok(rx[0])
     }
 }
 
-#[derive(Copy, Clone, Pod, Zeroable)]
+#[derive(FromBytes, IntoBytes, KnownLayout, Immutable)]
 #[repr(C)]
 pub struct Version {
     pub hw: u16,
@@ -111,24 +152,47 @@ impl defmt::Format for Version {
     }
 }
 
-#[derive(Copy, Clone, Pod, Zeroable)]
-#[repr(C)]
+#[derive(Clone, Copy, FromBytes, IntoBytes, KnownLayout, Immutable)]
+#[repr(C, packed)]
 pub struct RequestHeader {
     pub checksum_sync: u16,
     pub packet_type: u8,
     pub length: u8,
 }
 
-#[derive(Copy, Clone, Pod, Zeroable)]
-#[repr(C)]
+impl RequestHeader {
+    pub fn new(checksum_sync: u16, packet_type: u8, length: u8) -> Self {
+        Self {
+            checksum_sync,
+            packet_type,
+            length,
+        }
+    }
+
+    pub fn version() -> Self {
+        Self::new(packets::NO_CHECKSUM_SYNC, Request::VERSION, 0)
+    }
+
+    pub fn blocks() -> Self {
+        Self {
+            checksum_sync: packets::NO_CHECKSUM_SYNC,
+            length: 2,
+            packet_type: Request::BLOCKS,
+        }
+    }
+}
+
+#[derive(FromBytes, IntoBytes, KnownLayout, Immutable, Debug, Format)]
+#[repr(C, packed)]
 pub struct ResponseHeader {
     pub packet_type: u8,
     pub length: u8,
-    pub checksum: u16,
+    pub checksum_l: u8,
+    pub checksum_h: u8,
 }
 
-#[derive(Copy, Clone, Pod, Zeroable)]
-#[repr(C)]
+#[derive(FromBytes, IntoBytes, KnownLayout, Immutable, Clone, Copy)]
+#[repr(C, packed)]
 pub struct Block {
     pub signature: u16,
     pub x: u16,
@@ -138,6 +202,31 @@ pub struct Block {
     pub angle: i16,
     pub index: u8,
     pub age: u8,
+}
+
+impl defmt::Format for Block {
+    fn format(&self, fmt: defmt::Formatter) {
+        let signature = self.signature;
+        let x = self.x;
+        let y = self.y;
+        let width = self.width;
+        let height = self.height;
+        let angle = self.angle;
+        let index = self.index;
+        let age = self.age;
+        defmt::write!(
+            fmt,
+            "pos: ({} {}), sig: {:b}, size: ({} {}), angle: {}, i: {}, age: {}",
+            x,
+            y,
+            signature,
+            width,
+            height,
+            angle,
+            index,
+            age
+        );
+    }
 }
 //   uint16_t m_signature;
 //   uint16_t m_x;

@@ -9,11 +9,15 @@ impl Request {
     pub const LAMP: u8 = 0x16;
     pub const FPS: u8 = 0x18;
     pub const BLOCKS: u8 = 0x20;
-
-    pub const NO_CHECKSUM_SYNC_L: u8 = 0xae;
-    pub const NO_CHECKSUM_SYNC_H: u8 = 0xc1;
-    pub const NO_CHECKSUM_SYNC: u16 = 0xc1ae;
 }
+
+pub const NO_CHECKSUM_SYNC: u16 = 0xc1ae;
+pub const NO_CHECKSUM_SYNC_L: u8 = (NO_CHECKSUM_SYNC & 0xff) as u8;
+pub const NO_CHECKSUM_SYNC_H: u8 = (NO_CHECKSUM_SYNC >> 8) as u8;
+
+pub const CHECKSUM_SYNC: u16 = 0xc1af;
+pub const CHECKSUM_SYNC_L: u8 = (CHECKSUM_SYNC & 0xff) as u8;
+pub const CHECKSUM_SYNC_H: u8 = (CHECKSUM_SYNC >> 8) as u8;
 
 pub struct Response;
 impl Response {
