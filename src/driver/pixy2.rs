@@ -1,4 +1,3 @@
-use defmt::{Format, dbg};
 use embedded_hal_async::spi::{Operation, SpiDevice};
 use zerocopy::{FromBytes as _, IntoBytes as _};
 use zerocopy_derive::{FromBytes, Immutable, IntoBytes, KnownLayout};
@@ -182,7 +181,10 @@ impl RequestHeader {
     }
 }
 
-#[derive(FromBytes, IntoBytes, KnownLayout, Immutable, Debug, Format)]
+#[derive(FromBytes, IntoBytes, KnownLayout, Immutable, Debug)]
+// Probably make checksum u16 again and impl Format manually.
+// packet_type should print name, not number.
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[repr(C, packed)]
 pub struct ResponseHeader {
     pub packet_type: u8,
@@ -204,6 +206,7 @@ pub struct Block {
     pub age: u8,
 }
 
+#[cfg(feature = "defmt")]
 impl defmt::Format for Block {
     fn format(&self, fmt: defmt::Formatter) {
         let signature = self.signature;
